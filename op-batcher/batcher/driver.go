@@ -10,6 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
+
 	"github.com/ethereum-optimism/optimism/op-batcher/metrics"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
@@ -17,9 +23,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/dial"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/txmgr"
-	"github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 var ErrBatcherNotRunning = errors.New("batcher is not running")
@@ -385,7 +388,7 @@ func (l *BatchSubmitter) clearState(ctx context.Context) {
 // publishTxToL1 submits a single state tx to the L1
 func (l *BatchSubmitter) publishTxToL1(ctx context.Context, queue *txmgr.Queue[txID], receiptsCh chan txmgr.TxReceipt[txID]) error {
 	// send all available transactions
-	l1tip, err := l.l1Tip(ctx)
+	l1tip, l1Header, err := l.l1Tip(ctx)
 	if err != nil {
 		l.Log.Error("Failed to query L1 tip", "err", err)
 		return err
@@ -403,7 +406,7 @@ func (l *BatchSubmitter) publishTxToL1(ctx context.Context, queue *txmgr.Queue[t
 		return err
 	}
 
-	if err = l.sendTransaction(ctx, txdata, queue, receiptsCh); err != nil {
+	if err = l.sendTransaction(ctx, txdata, l1Header, queue, receiptsCh); err != nil {
 		return fmt.Errorf("BatchSubmitter.sendTransaction failed: %w", err)
 	}
 	return nil
@@ -433,9 +436,29 @@ func (l *BatchSubmitter) safeL1Origin(ctx context.Context) (eth.BlockID, error) 
 	return status.SafeL2.L1Origin, nil
 }
 
+func (l *BatchSubmitter) isBlobFeeHigh(l1Header *types.Header, blobs []*eth.Blob, calldata []byte) bool {
+	blobBaseFee := eip4844.CalcBlobFee(*l1Header.ExcessBlobGas)
+	blobGas := new(big.Int).SetInt64(int64(eth.BlobSize * len(blobs)))
+	blobFee := new(big.Int).Mul(blobBaseFee, blobGas)
+
+	zeroes := uint64(0)
+	ones := uint64(0)
+	for _, b := range calldata {
+		if b == 0 {
+			zeroes++
+		} else {
+			ones++
+		}
+	}
+	calldataGas := (zeroes * params.TxDataZeroGas) + (ones * params.TxDataNonZeroGasEIP2028)
+	calldataFee := new(big.Int).Mul(new(big.Int).SetUint64(calldataGas), l1Header.BaseFee)
+
+	return blobFee.Cmp(calldataFee) > 0
+}
+
 // sendTransaction creates & queues for sending a transaction to the batch inbox address with the given `txData`.
 // The method will block if the queue's MaxPendingTransactions is exceeded.
-func (l *BatchSubmitter) sendTransaction(ctx context.Context, txdata txData, queue *txmgr.Queue[txID], receiptsCh chan txmgr.TxReceipt[txID]) error {
+func (l *BatchSubmitter) sendTransaction(ctx context.Context, txdata txData, l1Header *types.Header, queue *txmgr.Queue[txID], receiptsCh chan txmgr.TxReceipt[txID]) error {
 	var err error
 	// Do the gas estimation offline. A value of 0 will cause the [txmgr] to estimate the gas limit.
 
@@ -447,6 +470,11 @@ func (l *BatchSubmitter) sendTransaction(ctx context.Context, txdata txData, que
 			// to just fail. We do not expect this error to trigger unless there is a serious bug
 			// or configuration issue.
 			return fmt.Errorf("could not create blob tx candidate: %w", err)
+		}
+
+		if l.isBlobFeeHigh(l1Header, candidate.Blobs, txdata.CallData()) {
+			l.Log.Info("post calldata instead blob because blob fee is too high")
+			candidate = l.calldataTxCandidate(txdata.CallData())
 		}
 	} else {
 		// sanity check
@@ -535,14 +563,14 @@ func (l *BatchSubmitter) recordConfirmedTx(id txID, receipt *types.Receipt) {
 
 // l1Tip gets the current L1 tip as a L1BlockRef. The passed context is assumed
 // to be a lifetime context, so it is internally wrapped with a network timeout.
-func (l *BatchSubmitter) l1Tip(ctx context.Context) (eth.L1BlockRef, error) {
+func (l *BatchSubmitter) l1Tip(ctx context.Context) (eth.L1BlockRef, *types.Header, error) {
 	tctx, cancel := context.WithTimeout(ctx, l.Config.NetworkTimeout)
 	defer cancel()
 	head, err := l.L1Client.HeaderByNumber(tctx, nil)
 	if err != nil {
-		return eth.L1BlockRef{}, fmt.Errorf("getting latest L1 block: %w", err)
+		return eth.L1BlockRef{}, nil, fmt.Errorf("getting latest L1 block: %w", err)
 	}
-	return eth.InfoToL1BlockRef(eth.HeaderBlockInfo(head)), nil
+	return eth.InfoToL1BlockRef(eth.HeaderBlockInfo(head)), head, nil
 }
 
 func logFields(xs ...any) (fs []any) {
