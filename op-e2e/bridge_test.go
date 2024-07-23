@@ -6,17 +6,16 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/params"
-	"github.com/stretchr/testify/require"
-
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/receipts"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/transactions"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/wait"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/stretchr/testify/require"
 
 	"github.com/kroma-network/kroma/kroma-bindings/bindings"
 	"github.com/kroma-network/kroma/kroma-bindings/predeploys"
@@ -99,10 +98,7 @@ func TestERC20BridgeDeposits(t *testing.T) {
 
 	depositTx, err := derive.UnmarshalDepositLogEvent(&depositEvent.Raw)
 	require.NoError(t, err)
-	// [Kroma: START] Use KromaDepositTx instead of DepositTx
-	kromaDepTx := types.NewTx(depositTx).ToKromaDepositTx()
-	_, err = wait.ForReceiptOK(context.Background(), l2Client, kromaDepTx.Hash())
-	// [Kroma: END]
+	_, err = wait.ForReceiptOK(context.Background(), l2Client, types.NewTx(depositTx).Hash())
 	require.NoError(t, err)
 
 	// Ensure that the deposit went through
@@ -197,10 +193,7 @@ func TestBridgeGovernanceToken(t *testing.T) {
 
 	depositTx, err := derive.UnmarshalDepositLogEvent(&depositEvent.Raw)
 	require.NoError(t, err)
-	// [Kroma: START] Use KromaDepositTx instead of DepositTx
-	kromaDepTx := types.NewTx(depositTx).ToKromaDepositTx()
-	_, err = wait.ForReceiptOK(context.Background(), l2Client, kromaDepTx.Hash())
-	// [Kroma: END]
+	_, err = wait.ForReceiptOK(context.Background(), l2Client, types.NewTx(depositTx).Hash())
 	require.NoError(t, err)
 
 	// Check GovernanceToken total supply and balance of Bob after deposit
